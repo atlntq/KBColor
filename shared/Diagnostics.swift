@@ -142,9 +142,11 @@ final class Diagnostics {
             for k in kextProps.keys.sorted() where !skip.contains(k) {
                 lines.append("  \(k) = \(Diagnostics.describe(kextProps[k]!))")
             }
-            if let caps {
-                let names = Diagnostics.capNames.filter { caps & $0.0 != 0 }.map { $0.1 }
-                lines.append("  → yetenekler: " + (names.isEmpty ? "yok" : names.joined(separator: ", ")))
+            let (c, inferred) = Diagnostics.capabilities(kextProps)
+            let names = Diagnostics.capNames.filter { c & $0.0 != 0 }.map { $0.1 }
+            lines.append("  → yetenekler\(inferred ? " (GCAP yok, çıkarım)" : ""): " + (names.isEmpty ? "yok" : names.joined(separator: ", ")))
+            if inferred {
+                add(.warn, "SSDT'lerde GCAP yok (eski paket). Menü yetenekleri tahminle kuruluyor; KBColor Kurulum ile SSDT'leri yeniden üretmeniz önerilir.")
             }
         } else if kbcd != 0 {
             add(.fail, "KBCD cihazı var ama KBColor.kext ona bağlanmamış. config.plist → Kernel → Add içinde KBColor.kext Enabled mı, BundlePath \"KBColor.kext\", ExecutablePath \"Contents/MacOS/KBColor\" mı?")
@@ -373,6 +375,33 @@ final class Diagnostics {
     func analyzeLogForTest() -> [DiagFinding] {
         bootLog()
         return findings
+    }
+
+    // KBCD.GCAP bits for a kext that does not publish "Capabilities": the
+    // hand-made 2.0 Acer package and the ASUS 1.x kext have no GCAP. Taken
+    // from "Methods" (kext 2.1+) or else from the values the kext publishes.
+    static func capabilities(_ p: [String: Any]) -> (caps: Int, inferred: Bool) {
+        if let c = (p["Capabilities"] as? NSNumber)?.intValue { return (c, false) }
+        var c = 0
+        if let m = p["Methods"] as? [String] {
+            if m.contains("SCLR") { c |= 0x001 }
+            if m.contains("SZCL") { c |= 0x002 }
+            if m.contains("SEFF") { c |= 0x004 }
+            if m.contains("SBRT") { c |= 0x008 } else if m.contains("SCLR") { c |= 0x010 }
+            if m.contains("SFAN") { c |= 0x020 | (m.contains("SPCT") ? 0x080 : 0x040) }
+            if m.contains("GRPM") { c |= 0x100 }
+        } else {
+            let effects = p["Effect"] != nil || p["Brightness"] != nil   // Acer-style SSDT
+            if p["Color"] != nil || effects { c |= 0x001 }
+            if effects { c |= 0x002 | 0x004 | 0x008 } else if p["Color"] != nil { c |= 0x010 }
+            if p["FanMode"] != nil { c |= 0x020 | (p["FanSpeed"] != nil || effects ? 0x080 : 0x040) }
+            if p["CPUFanRPM"] != nil { c |= 0x100 }
+        }
+        // Nothing about the light published yet (the ASUS 1.x kext only shows
+        // "Color" after a change): offer a single colour with system brightness.
+        if c & 0x00F == 0 && c & 0x010 == 0 { c |= 0x001 | 0x010 }
+        if c & 0x020 != 0 { c |= 0x200 }
+        return (c, true)
     }
 
     // Writes the report to the Desktop and returns its URL.

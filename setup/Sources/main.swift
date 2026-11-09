@@ -8,6 +8,7 @@ import Foundation
 func cliMain(_ a: [String]) -> Int32 {
     if a.contains("--test-analysis") { return testAnalysis() }
     if a.contains("--test-diagnostics") { return testDiagnostics() }
+    if a.contains("--test-caps") { return testCaps() }
     if let i = a.firstIndex(of: "--diagnose") {
         let cfg = i + 1 < a.count ? URL(fileURLWithPath: a[i + 1]) : nil
         print(Diagnostics(config: cfg) { FileHandle.standardError.write(($0 + "\n").data(using: .utf8)!) }.run())
@@ -84,6 +85,32 @@ func testDiagnostics() -> Int32 {
         && f.contains { $0.level == .info && $0.text.contains("Ther_Rvp") }
         && !f.contains { $0.level == .fail && $0.text.contains("Ther_Rvp") }
         && f.contains { $0.text.contains("SFAN GFAN") }
+    print(ok ? "TEST GEÇTİ" : "TEST KALDI")
+    return ok ? 0 : 1
+}
+
+// Capability inference for kexts without "Capabilities".
+func testCaps() -> Int32 {
+    let n = { (v: Int) in NSNumber(value: v) }
+    let cases: [(String, [String: Any], Int)] = [
+        // darkside: hand-made Acer 2.0 kext, SSDT-FANM not loaded
+        ("Acer 2.0, FANM yok", ["Color": n(0xFF0000), "Effect": n(0x010101), "Brightness": n(100)], 0x00F),
+        // same, FANM loaded
+        ("Acer 2.0, FANM var", ["Color": n(0xFF0000), "Effect": n(0x010101), "Brightness": n(100), "FanMode": n(0), "FanSpeed": n(60), "CPUFanRPM": n(3000)], 0x3AF),
+        // ASUS 1.1 kext right after boot (no Color yet)
+        ("ASUS 1.1", ["FanMode": n(0), "CPUFanRPM": n(3500), "GPUFanRPM": n(3300)], 0x371),
+        ("ASUS 1.1, renk ayarlanmış", ["Color": n(0xFFFFFF), "FanMode": n(0), "CPUFanRPM": n(3500)], 0x371),
+        // kext 2.1 with Methods but old SSDTs without GCAP (Acer)
+        ("2.1 + Acer SSDT", ["Methods": ["SCLR", "SZCL", "SEFF", "SBRT", "GLGT", "GCLR", "SFAN", "GFAN", "SPCT", "GPCT", "GRPM"]], 0x3AF),
+        // GCAP present wins
+        ("GCAP", ["Capabilities": n(0x10371), "Effect": n(1)], 0x10371),
+    ]
+    var ok = true
+    for (name, p, want) in cases {
+        let got = Diagnostics.capabilities(p).caps
+        print(String(format: "%@: 0x%X (beklenen 0x%X) %@", name, got, want, got == want ? "✓" : "✗"))
+        ok = ok && got == want
+    }
     print(ok ? "TEST GEÇTİ" : "TEST KALDI")
     return ok ? 0 : 1
 }

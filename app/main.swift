@@ -67,7 +67,16 @@ func published(_ key: String) -> Int? {
     }
 }
 
-let caps = Caps(rawValue: published("Capabilities") ?? 0)
+// From KBCD.GCAP, or inferred for older kexts / SSDTs without it.
+let caps: Caps = {
+    _ = setKext("Refresh", 1) || setKext("ReadFanMode", 1)
+    let props: [String: Any] = withKext { svc in
+        var d: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(svc, &d, kCFAllocatorDefault, 0) == KERN_SUCCESS else { return nil }
+        return d?.takeRetainedValue() as? [String: Any]
+    } ?? [:]
+    return Caps(rawValue: withKext({ _ in true }) == nil ? 0 : Diagnostics.capabilities(props).caps)
+}()
 
 // (name, mode, symbol) in menu order, from the capabilities.
 let fanModes: [(String, Int, String)] = {
@@ -86,7 +95,8 @@ func publishedFans() -> FanState {
 }
 
 func readFans() -> FanState {
-    guard setKext("Refresh", 1) else { return FanState() }
+    // "ReadFanMode": the ASUS 1.x kext
+    guard setKext("Refresh", 1) || setKext("ReadFanMode", 1) else { return FanState() }
     return publishedFans()
 }
 
