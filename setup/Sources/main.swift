@@ -25,7 +25,10 @@ func cliMain(_ a: [String]) -> Int32 {
         switch try pipeline.run(dump: URL(fileURLWithPath: a[2]), outputParent: URL(fileURLWithPath: a[3]),
                                 offsets: offsets, forceDiscovery: a.contains("--discover")) {
         case .final(let o): print("SONUÇ: final \(o.outputFolder.path)")
-        case .probe(let p): print("SONUÇ: keşif \(p.outputFolder.path)"); DiscoveryState.clear()
+        case .probe(let p):
+            print("SONUÇ: keşif \(p.outputFolder.path)")
+            // --keep-state: leave the wizard state for the app (real discovery)
+            if !a.contains("--keep-state") { DiscoveryState.clear() }
         }
         return 0
     } catch {

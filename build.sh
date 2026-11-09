@@ -23,6 +23,11 @@ rm "$B"/*.o
 A="$B/KBColor.app"; mkdir -p "$A/Contents/MacOS"
 xcrun swiftc -O -swift-version 5 -target x86_64-apple-macos13.0 "$R/app/main.swift" "$R/shared/Diagnostics.swift" -o "$A/Contents/MacOS/KBColor"
 cp "$R/app/Info.plist" "$A/Contents/Info.plist"
+# Loaded into apps opened with "NVIDIA ile aç" (see app/nvdefault.m).
+mkdir -p "$A/Contents/Frameworks"
+xcrun clang -O2 -fobjc-arc -dynamiclib -arch x86_64 -mmacosx-version-min=13.0 -framework Metal -framework Foundation \
+  "$R/app/nvdefault.m" -o "$A/Contents/Frameworks/libnvdefault.dylib"
+codesign --force --sign - "$A/Contents/Frameworks/libnvdefault.dylib"
 codesign --force --sign - "$A"
 
 # setup assistant

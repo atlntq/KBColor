@@ -76,7 +76,8 @@ Some laptops keep the keyboard colour and level in EC RAM bytes that no ACPI met
 - colour for the whole keyboard or for one zone
 - fan control, *Automatic* or *Manual*
 - the fan modes
-- sensors: CPU package and core temperatures, CPU / core / iGPU power, battery draw, fan RPM
+- sensors: CPU package and core temperatures, CPU / core / iGPU power, battery draw and time left, fan RPM, and the NVIDIA GPU temperature when the driver is loaded
+- **NVIDIA ile aç**, shown only when the [nullmoth NVIDIA driver](https://github.com/nullmoth/nvidia-macos-driver) is loaded: opens the listed apps with `libnvdefault.dylib`, which makes the NVIDIA card their default Metal device, much like Optimus. In automatic mode the listed apps also get it when they are opened from the Dock or Finder.
 
 Automatic fan control switches modes by CPU temperature with hysteresis, and the thresholds are set from the menu. Pressing the fan key, or picking a mode by hand, switches back to manual. Every mode change shows a HUD. Settings are saved and reapplied at login.
 
@@ -91,7 +92,7 @@ KBColor.app ──IOKit properties──▶ KBColor.kext ──evaluate──▶
 | Folder | What |
 |---|---|
 | `kext/` | `KBColor.kext`. It matches `KBCD0001` and forwards one property per call to a KBCD method: `Color`→`SCLR`, `ZoneColor`→`SZCL`, `Effect`→`SEFF`, `Brightness`→`SBRT`, `FanMode`→`SFAN`, `FanSpeed`→`SPCT`. `Refresh` publishes the state. It publishes `GCAP` as `Capabilities`. It is vendor-agnostic: methods a laptop lacks are never called. |
-| `app/` | `KBColor.app`, the menu bar app. |
+| `app/` | `KBColor.app`, the menu bar app. `nvdefault.m` builds `libnvdefault.dylib`, which the app uses for "NVIDIA ile aç". |
 | `setup/Sources/ASL.swift` | Reader for `iasl -dl` output: devices, methods with their bodies, regions, and fields with bit offsets. |
 | `setup/Sources/Profiles.swift` | Vendor profiles and SSDT templates. |
 | `setup/Sources/Pipeline.swift` | Disassembly, compilation, renames, `acpiexec` validation and output. |

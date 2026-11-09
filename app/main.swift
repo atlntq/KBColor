@@ -11,10 +11,17 @@
 // Choices are saved and reapplied at launch. In automatic fan control the app
 // picks the mode from the CPU temperature. The menu also lists temperatures,
 // power draw and fan speeds.
+//
+// With the nullmoth NVIDIA driver loaded, "NVIDIA ile aç" opens chosen apps
+// with libnvdefault.dylib, which makes the NVIDIA card their default Metal
+// device (like Optimus); in automatic mode the listed apps get it however they
+// are opened. The menu then also shows the NVIDIA GPU temperature.
 
 import AppKit
 import IOKit
+import IOKit.ps
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // KBCD.GCAP bits (keep in sync with the setup assistant's templates)
 struct Caps: OptionSet {
@@ -152,6 +159,26 @@ final class SMC {
     }
 }
 
+func nvidiaPresent() -> Bool {
+    let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"))
+    guard svc != 0 else { return false }
+    IOObjectRelease(svc)
+    return true
+}
+
+// NVIDIA GPU temperature published by the nullmoth driver (NVAccel's
+// PerformanceStatistics). nil when the driver is not loaded, e.g. with the
+// EFI that turns the dGPU off.
+func nvidiaTemperature() -> Double? {
+    let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"))
+    guard svc != 0 else { return nil }
+    defer { IOObjectRelease(svc) }
+    let v = IORegistryEntryCreateCFProperty(svc, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0)
+    guard let stats = v?.takeRetainedValue() as? [String: Any],
+          let t = (stats["Temperature(C)"] as? NSNumber)?.doubleValue, t > 0 else { return nil }
+    return t
+}
+
 // CPU sensors, sampled in one place at a steady rate. Every read of an
 // SMCProcessor key makes the kext recompute power from the RAPL energy
 // counters, but its per-core threads refresh those counters only every
@@ -192,10 +219,18 @@ func sensorTitles(_ cpu: CPUSensors, _ smc: SMC) -> [String] {
     if !cores.isEmpty { rows.append("Çekirdekler: " + cores.map { String(format: "%.0f", $0) }.joined(separator: " / ") + " °C") }
     rows.append("CPU gücü: \(w(cpu.power("PCPR")))")
     rows.append("Çekirdek: \(w(cpu.power("PCPC")))  ·  iGPU: \(w(cpu.power("PCPG")))")
+    // Only when the NVIDIA driver is loaded, so the row count stays the same
+    // while the menu is open (the driver does not come and go at runtime).
+    if nvidiaPresent() {
+        rows.append("NVIDIA GPU: \(c(nvidiaTemperature()))")
+    }
     if let ma = smc.value("B0AC"), let mv = smc.value("B0AV") {
         let watts = abs(ma * mv) / 1_000_000
-        rows.append(ma < 0 ? String(format: "Pil: %.1f W harcanıyor", watts)
-                    : ma > 0 ? String(format: "Pil: şarj oluyor (%.1f W)", watts) : "Pil: adaptörde")
+        let time = batteryMinutes().map { m in
+            m.toEmpty.map { " · \(hm($0)) kaldı" } ?? m.toFull.map { " · dolmasına \(hm($0))" } ?? ""
+        } ?? ""
+        rows.append(ma < 0 ? String(format: "Pil: %.1f W harcanıyor", watts) + time
+                    : ma > 0 ? String(format: "Pil: şarj oluyor (%.1f W)", watts) + time : "Pil: adaptörde")
     }
     return rows
 }
@@ -203,6 +238,24 @@ func sensorTitles(_ cpu: CPUSensors, _ smc: SMC) -> [String] {
 // Automatic fan control. With Silent: Silent below `low`, Turbo from `high`,
 // Normal in between. Without: Normal / Turbo around `high`. Stepping down
 // needs the temperature `hysteresis` degrees under the threshold.
+func hm(_ minutes: Int) -> String { String(format: "%d:%02d", minutes / 60, minutes % 60) }
+
+// macOS's own estimate of the minutes until the battery is empty (on battery)
+// or full (charging), the same figures `pmset -g batt` prints. A value is nil
+// while macOS is still calculating it (-1) or when it does not apply.
+func batteryMinutes() -> (toEmpty: Int?, toFull: Int?)? {
+    guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+          let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
+    for ps in list {
+        guard let d = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any],
+              d[kIOPSTypeKey] as? String == kIOPSInternalBatteryType else { continue }
+        func minutes(_ key: String) -> Int? { (d[key] as? Int).flatMap { $0 > 0 ? $0 : nil } }
+        let charging = d[kIOPSIsChargingKey] as? Bool ?? false
+        return (charging ? nil : minutes(kIOPSTimeToEmptyKey), charging ? minutes(kIOPSTimeToFullChargeKey) : nil)
+    }
+    return nil
+}
+
 let hysteresis = 5.0
 let lowChoices = [45, 50, 55, 60, 65, 70]
 let highChoices = [70, 75, 80, 85, 90]
@@ -412,6 +465,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         get { Store.int("autoHigh") ?? 80 }
         set { Store.set("autoHigh", newValue) }
     }
+    // Bundle paths of the apps listed under "NVIDIA ile aç".
+    var nvApps: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "nvApps") ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: "nvApps") }
+    }
+    var nvAuto: Bool {
+        get { UserDefaults.standard.bool(forKey: "nvAuto") }
+        set { UserDefaults.standard.set(newValue, forKey: "nvAuto") }
+    }
+
     var target: Int {
         get { caps.contains(.zones) ? Store.int("target") ?? 0 : 0 }
         set { Store.set("target", newValue) }
@@ -426,9 +489,18 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startTitle()
         menu.delegate = self
         item.menu = menu
+        // KBColor 1.x kept one colour under "color"; 2.x keeps the whole
+        // keyboard under "color0" and zones under "color1"..."color4".
+        if Store.color(0) == nil, let old = Store.int("color") { Store.set("color0", old) }
         restoreLighting()
         watchKext()
         if fanAuto && caps.contains(.fan) { startAuto() }
+        applyNvEnv()
+    }
+
+    func applicationWillTerminate(_ n: Notification) {
+        launchctl(["unsetenv", "DYLD_INSERT_LIBRARIES"])
+        launchctl(["unsetenv", "NVDEFAULT_APPS"])
     }
 
     // Reapply what was chosen here: zone colours, then effect, then brightness.
@@ -540,6 +612,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         liveItems = liveTitles(fans).map { NSMenuItem(title: $0, action: nil, keyEquivalent: "") }
         for mi in liveItems { mi.indentationLevel = 1; m.addItem(mi) }
         m.addItem(.separator())
+        if nvidiaPresent() {
+            m.addItem(nvidiaMenu())
+            m.addItem(.separator())
+        }
         let diag = NSMenuItem(title: "Tanılama raporu…", action: #selector(diagnose), keyEquivalent: "")
         diag.target = self
         diag.image = NSImage(systemSymbolName: "stethoscope", accessibilityDescription: nil)
@@ -753,6 +829,140 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.timer = nil
                 if let v = self.pending { self.pending = nil; self.apply(v) }
             }
+        }
+    }
+
+    // MARK: NVIDIA ile aç (nullmoth driver)
+
+    func appName(_ path: String) -> String {
+        FileManager.default.displayName(atPath: path).replacingOccurrences(of: ".app", with: "")
+    }
+
+    func appIcon(_ path: String) -> NSImage {
+        let i = NSWorkspace.shared.icon(forFile: path)
+        i.size = NSSize(width: 16, height: 16)
+        return i
+    }
+
+    func nvidiaMenu() -> NSMenuItem {
+        let top = NSMenuItem(title: "NVIDIA ile aç", action: nil, keyEquivalent: "")
+        top.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
+        let sub = NSMenu()
+        let auto = NSMenuItem(title: "Otomatik (Dock ve Finder'dan açınca da)", action: #selector(toggleNvAuto), keyEquivalent: "")
+        auto.target = self; auto.state = nvAuto ? .on : .off
+        sub.addItem(auto)
+        sub.addItem(.separator())
+        let apps = nvApps.filter { FileManager.default.fileExists(atPath: $0) }
+        for path in apps {
+            let mi = NSMenuItem(title: appName(path), action: #selector(openNv(_:)), keyEquivalent: "")
+            mi.target = self; mi.representedObject = path; mi.image = appIcon(path)
+            sub.addItem(mi)
+        }
+        if !apps.isEmpty { sub.addItem(.separator()) }
+        let add = NSMenuItem(title: "Uygulama ekle…", action: #selector(addNvApp), keyEquivalent: "")
+        add.target = self
+        sub.addItem(add)
+        if !apps.isEmpty {
+            let remove = NSMenuItem(title: "Listeden çıkar", action: nil, keyEquivalent: "")
+            let rm = NSMenu()
+            for path in apps {
+                let mi = NSMenuItem(title: appName(path), action: #selector(removeNvApp(_:)), keyEquivalent: "")
+                mi.target = self; mi.representedObject = path; mi.image = appIcon(path)
+                rm.addItem(mi)
+            }
+            remove.submenu = rm
+            sub.addItem(remove)
+        }
+        top.submenu = sub
+        return top
+    }
+
+    @objc func addNvApp() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.application]
+        p.allowsMultipleSelection = true
+        p.directoryURL = URL(fileURLWithPath: "/Applications")
+        p.message = "NVIDIA ekran kartıyla açılacak uygulamaları seçin"
+        NSApp.activate(ignoringOtherApps: true)
+        guard p.runModal() == .OK else { return }
+        var list = nvApps
+        for u in p.urls where !list.contains(u.path) { list.append(u.path) }
+        nvApps = list
+        applyNvEnv()
+    }
+
+    @objc func removeNvApp(_ s: NSMenuItem) {
+        guard let path = s.representedObject as? String else { return }
+        nvApps = nvApps.filter { $0 != path }
+        applyNvEnv()
+    }
+
+    @objc func toggleNvAuto() {
+        nvAuto.toggle()
+        applyNvEnv()
+    }
+
+    var nvLibrary: URL? {
+        guard let u = Bundle.main.privateFrameworksURL?.appendingPathComponent("libnvdefault.dylib"),
+              FileManager.default.fileExists(atPath: u.path) else { return nil }
+        return u
+    }
+
+    @discardableResult
+    func launchctl(_ args: [String]) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        do { try p.run(); p.waitUntilExit() } catch { return false }
+        return p.terminationStatus == 0
+    }
+
+    // Automatic mode: launchd passes the library to every app it starts from
+    // now on; it acts only in the apps whose bundle IDs are in NVDEFAULT_APPS.
+    // Apps already running are not affected. Cleared when the mode is off, the
+    // list is empty, the driver is not loaded, or KBColor quits.
+    func applyNvEnv() {
+        let ids = nvApps.compactMap { Bundle(path: $0)?.bundleIdentifier }
+        if nvAuto, !ids.isEmpty, nvidiaPresent(), let lib = nvLibrary {
+            launchctl(["setenv", "NVDEFAULT_APPS", ids.joined(separator: ":")])
+            launchctl(["setenv", "DYLD_INSERT_LIBRARIES", lib.path])
+        } else {
+            launchctl(["unsetenv", "DYLD_INSERT_LIBRARIES"])
+            launchctl(["unsetenv", "NVDEFAULT_APPS"])
+        }
+    }
+
+    // The library only takes effect at launch, so a running copy has to quit first.
+    @objc func openNv(_ s: NSMenuItem) {
+        guard let path = s.representedObject as? String else { return }
+        let running = Bundle(path: path)?.bundleIdentifier.map { NSRunningApplication.runningApplications(withBundleIdentifier: $0) } ?? []
+        if running.isEmpty { launchNv(path); return }
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "\(appName(path)) zaten açık"
+        a.informativeText = "NVIDIA ile açmak için uygulamanın kapatılıp yeniden açılması gerekiyor. Kaydedilmemiş işleriniz varsa önce kaydedin."
+        a.addButton(withTitle: "Kapat ve NVIDIA ile aç")
+        a.addButton(withTitle: "Vazgeç")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        running.forEach { $0.terminate() }
+        let deadline = Date().addingTimeInterval(15)
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] t in
+            if running.allSatisfy({ $0.isTerminated }) {
+                t.invalidate(); self?.launchNv(path)
+            } else if Date() > deadline {
+                t.invalidate(); NSSound.beep()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    func launchNv(_ path: String) {
+        guard let lib = nvLibrary else { NSSound.beep(); return }
+        let c = NSWorkspace.OpenConfiguration()
+        c.environment = ["DYLD_INSERT_LIBRARIES": lib.path, "NVDEFAULT_FORCE": "1"]
+        c.activates = true
+        NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: c) { _, err in
+            if err != nil { DispatchQueue.main.async { NSSound.beep() } }
         }
     }
 
