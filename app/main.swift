@@ -530,6 +530,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         liveItems = liveTitles(fans).map { NSMenuItem(title: $0, action: nil, keyEquivalent: "") }
         for mi in liveItems { mi.indentationLevel = 1; m.addItem(mi) }
         m.addItem(.separator())
+        let diag = NSMenuItem(title: "Tanılama raporu…", action: #selector(diagnose), keyEquivalent: "")
+        diag.target = self
+        diag.image = NSImage(systemSymbolName: "stethoscope", accessibilityDescription: nil)
+        m.addItem(diag)
         let login = NSMenuItem(title: "Açılışta başlat", action: #selector(toggleLogin), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -738,6 +742,49 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return }
                 self.timer = nil
                 if let v = self.pending { self.pending = nil; self.apply(v) }
+            }
+        }
+    }
+
+    // Same report as KBColor Kurulum: saved to the Desktop, then shown.
+    @objc func diagnose() {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Tanılama raporu"
+        a.informativeText = "Sistem, KBColor.kext ve açılıştaki ACPI hataları kontrol edilir ve rapor masaüstüne kaydedilir. EFI'deki config.plist'i de seçersen SSDT sırası, fan tuşu rename'i ve kext girdisi de kontrol edilir."
+        a.addButton(withTitle: "config.plist seç…")
+        a.addButton(withTitle: "config.plist olmadan")
+        a.addButton(withTitle: "Vazgeç")
+        let r = a.runModal()
+        if r == .alertThirdButtonReturn { return }
+        var config: URL?
+        if r == .alertFirstButtonReturn {
+            let p = NSOpenPanel()
+            p.allowedContentTypes = [.propertyList]
+            p.message = "EFI/OC/config.plist dosyasını seç"
+            guard p.runModal() == .OK else { return }
+            config = p.url
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let d = Diagnostics(config: config)
+            let text = d.run()
+            let file = try? Diagnostics.save(text)
+            DispatchQueue.main.async {
+                let done = NSAlert()
+                let fails = d.findings.filter { $0.level == .fail }
+                done.messageText = fails.isEmpty ? "Rapor hazır" : "Rapor hazır: \(fails.count) sorun bulundu"
+                done.informativeText = (fails.isEmpty ? d.findings.prefix(3) : fails.prefix(3))
+                    .map { "\($0.level.rawValue) \($0.text)" }.joined(separator: "\n\n")
+                    + (file.map { "\n\nKaydedildi: \($0.lastPathComponent) (Masaüstü)" } ?? "")
+                done.addButton(withTitle: "Finder'da göster")
+                done.addButton(withTitle: "Forum konusunu aç")
+                done.addButton(withTitle: "Kapat")
+                NSApp.activate(ignoringOtherApps: true)
+                switch done.runModal() {
+                case .alertFirstButtonReturn: if let file { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+                case .alertSecondButtonReturn: NSWorkspace.shared.open(Diagnostics.forumURL)
+                default: break
+                }
             }
         }
     }

@@ -12,6 +12,8 @@ final class Model: ObservableObject {
         case probe(ProbeOutcome)
         case wizard
         case failed(String)
+        case diagnosing
+        case diagnosed(text: String, findings: [DiagFinding], file: URL?)
     }
 
     @Published var phase: Phase = .start
@@ -158,6 +160,30 @@ final class Model: ObservableObject {
         run(dump: URL(fileURLWithPath: s.dumpFolder), offsets: off)
     }
 
+    // Diagnostic report: optionally with config.plist, saved to the Desktop.
+    func diagnose() {
+        let a = NSAlert()
+        a.messageText = "config.plist de kontrol edilsin mi?"
+        a.informativeText = "EFI bölümündeki EFI/OC/config.plist dosyasını seçersen SSDT sırası, fan tuşu rename'i ve kext girdisi de kontrol edilir; dosyaların EFI'de olup olmadığına da bakılır. EFI bölümü bağlı değilse önce bağla."
+        a.addButton(withTitle: "config.plist seç…")
+        a.addButton(withTitle: "Atla")
+        var config: URL?
+        if a.runModal() == .alertFirstButtonReturn {
+            let p = NSOpenPanel()
+            p.allowedContentTypes = [.propertyList]
+            p.message = "EFI/OC/config.plist dosyasını seç"
+            if p.runModal() == .OK { config = p.url }
+        }
+        phase = .diagnosing
+        log = []
+        Task.detached {
+            let d = Diagnostics(config: config) { line in Task { @MainActor in self.log.append(line) } }
+            let text = d.run()
+            let file = try? Diagnostics.save(text)
+            await MainActor.run { self.phase = .diagnosed(text: text, findings: d.findings, file: file) }
+        }
+    }
+
     func cancelDiscovery() {
         DiscoveryState.clear()
         state = nil
@@ -185,6 +211,8 @@ struct ContentView: View {
             case .final(let o): FinalView(m: m, o: o)
             case .probe(let p): ProbeView(m: m, p: p)
             case .wizard: WizardView(m: m)
+            case .diagnosing: LogView(lines: m.log)
+            case .diagnosed(let text, let findings, let file): DiagnosisView(m: m, text: text, findings: findings, file: file)
             case .failed(let e):
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Hazırlanamadı", systemImage: "xmark.octagon.fill").foregroundStyle(.red).font(.headline)
@@ -224,6 +252,17 @@ struct StartView: View {
             }
             .controlSize(.large).buttonStyle(.borderedProminent)
             Spacer()
+            GroupBox {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "stethoscope").font(.title2)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Kurulumdan sonra sorun mu var?").font(.headline)
+                        Text("Tanılama raporu; sistemi, KBColor.kext'i, ACPI açılış hatalarını ve istersen config.plist'i kontrol eder, sorunu özetler ve her şeyi masaüstüne tek bir dosya olarak kaydeder. Bu dosyayı forum konusuna ekleyebilirsin.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Button("Tanılama raporu oluştur…") { m.diagnose() }
+                    }
+                }.padding(6).frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -383,4 +422,45 @@ struct SetupApp: App {
         WindowGroup("KBColor Kurulum") { ContentView() }
             .windowResizability(.contentMinSize)
     }
+}
+
+struct DiagnosisView: View {
+    @ObservedObject var m: Model
+    var text: String
+    var findings: [DiagFinding]
+    var file: URL?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            let fails = findings.filter { $0.level == .fail }.count
+            Label(fails == 0 ? "Rapor hazır" : "Rapor hazır: \(fails) sorun bulundu",
+                  systemImage: fails == 0 ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(.headline).foregroundStyle(fails == 0 ? .green : .orange)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(findings.sorted { order($0) < order($1) }.enumerated()), id: \.offset) { _, f in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(f.level.rawValue).bold().foregroundStyle(color(f.level)).frame(width: 14)
+                            Text(f.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            if let file { Text("Kaydedildi: \(file.path)").font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
+            HStack {
+                if let file { Button("Finder'da göster") { reveal(file) }.buttonStyle(.borderedProminent) }
+                Button("Panoya kopyala") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+                Button("Forum konusunu aç") { open(Diagnostics.forumURL) }
+                Spacer()
+                Button("Geri") { m.phase = m.state != nil ? .wizard : .start }
+            }
+        }
+    }
+
+    func order(_ f: DiagFinding) -> Int { [.fail: 0, .warn: 1, .info: 2, .ok: 3][f.level] ?? 4 }
+    func color(_ l: DiagFinding.Level) -> Color { l == .fail ? .red : l == .warn ? .orange : l == .ok ? .green : .secondary }
 }

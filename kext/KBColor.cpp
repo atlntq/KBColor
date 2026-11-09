@@ -24,6 +24,11 @@
 //  final SSDTs have no raw EC access.
 //  The ACPI methods range check again and return non-zero for a bad value.
 //
+//  Diagnostics: at start the kext logs its version, GCAP and which KBCD
+//  methods exist ("KBColor: ..." in the kernel log) and publishes them as
+//  "Version" and "Methods"; failed calls are logged too. The setup
+//  assistant's diagnostic report reads all of this.
+//
 //  Published: Capabilities, FanMode, FanSpeed, CPUFanRPM, GPUFanRPM, Effect,
 //  Brightness, Color. When the fan key is pressed the SSDT sends
 //  Notify (KBCD, 0x80); the new state is published and user space is told
@@ -34,6 +39,16 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMessage.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
+
+#ifndef KBCOLOR_VERSION
+#define KBCOLOR_VERSION "dev"
+#endif
+
+// Every method an SSDT may provide; used for the "Methods" diagnostic.
+static const char *const knownMethods[] = {
+    "GCAP", "SCLR", "SZCL", "SEFF", "SBRT", "GLGT", "GCLR",
+    "SFAN", "GFAN", "SPCT", "GPCT", "GRPM", "ECRN", "ECRD", "ECWR",
+};
 
 class KBColor : public IOService {
     OSDeclareDefaultStructors(KBColor)
@@ -74,9 +89,27 @@ bool KBColor::start(IOService *provider)
     if (lock == nullptr)
         return false;
 
+    setProperty("Version", KBCOLOR_VERSION);
     UInt32 caps = 0;
-    if (dev->evaluateInteger("GCAP", &caps) == kIOReturnSuccess)
+    bool hasCaps = dev->evaluateInteger("GCAP", &caps) == kIOReturnSuccess;
+    if (hasCaps)
         setProperty("Capabilities", caps, 32);
+
+    OSArray *found = OSArray::withCapacity(16);
+    char present[96] = "", missing[96] = "";
+    for (const char *m : knownMethods) {
+        bool ok = dev->validateObject(m) == kIOReturnSuccess;
+        if (ok && found != nullptr) {
+            const OSSymbol *sym = OSSymbol::withCString(m);
+            if (sym != nullptr) { found->setObject(sym); sym->release(); }
+        }
+        char *dst = ok ? present : missing;
+        if (strlen(dst) + 6 < sizeof(present)) { strlcat(dst, m, sizeof(present)); strlcat(dst, " ", sizeof(present)); }
+    }
+    if (found != nullptr) { setProperty("Methods", found); found->release(); }
+    IOLog("KBColor: %s on %s, GCAP %s0x%x\n", KBCOLOR_VERSION, provider->getName(), hasCaps ? "" : "missing ", caps);
+    IOLog("KBColor: methods present: %s\n", present);
+    IOLog("KBColor: methods missing: %s\n", missing);
     refresh();
     registerService();
     return true;
@@ -131,8 +164,12 @@ IOReturn KBColor::call(const char *method, UInt32 value)
     IOLockUnlock(lock);
     arg->release();
 
-    if (ret != kIOReturnSuccess)
+    if (ret != kIOReturnSuccess) {
+        IOLog("KBColor: %s(0x%x) failed: 0x%x\n", method, (unsigned)value, ret);
         return ret;
+    }
+    if (result != 0)
+        IOLog("KBColor: %s(0x%x) returned %u\n", method, (unsigned)value, (unsigned)result);
     return result == 0 ? kIOReturnSuccess : kIOReturnBadArgument;
 }
 

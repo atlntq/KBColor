@@ -7,6 +7,12 @@ import Foundation
 
 func cliMain(_ a: [String]) -> Int32 {
     if a.contains("--test-analysis") { return testAnalysis() }
+    if a.contains("--test-diagnostics") { return testDiagnostics() }
+    if let i = a.firstIndex(of: "--diagnose") {
+        let cfg = i + 1 < a.count ? URL(fileURLWithPath: a[i + 1]) : nil
+        print(Diagnostics(config: cfg) { FileHandle.standardError.write(($0 + "\n").data(using: .utf8)!) }.run())
+        return 0
+    }
     guard a.count >= 4 else { print("kullanım: --cli <döküm> <çıktı> [--discover] [--offsets C,L,M]"); return 2 }
     var offsets: KeyboardOffsets?
     if let i = a.firstIndex(of: "--offsets"), i + 1 < a.count {
@@ -58,3 +64,26 @@ if CommandLine.arguments.count > 1 && CommandLine.arguments[1].hasPrefix("--") {
     exit(cliMain(CommandLine.arguments))
 }
 SetupApp.main()
+
+// Synthetic kernel log in the real format (fragments, each line twice):
+// SSDT-FANM fails on _Q58 (missing rename), a firmware SSDT fails too.
+func testDiagnostics() -> Int32 {
+    var lines: [String] = []
+    func emit(_ frags: [String]) { for f in frags { for _ in 0..<2 { lines.append("2026-11-09 17:00:01.100 Df kernel[0:71] (AppleACPIPlatform) " + f) } } }
+    emit(["ACPI Error:", "[_Q58]", " Namespace lookup failure, AE_ALREADY_EXISTS", " (20160930/dswload-462)"])
+    emit(["ACPI Exception: AE_ALREADY_EXISTS,", "(SSDT:    FANM) while loading table", " (20160930/tbxfload-319)"])
+    emit(["ACPI Error:", "[ETMD]", " Namespace lookup failure, AE_ALREADY_EXISTS", " (20160930/dswload-462)"])
+    emit(["ACPI Exception: AE_ALREADY_EXISTS,", "(SSDT:Ther_Rvp) while loading table", " (20160930/tbxfload-319)"])
+    emit(["ACPI Error:", "2 table load failures, 21 successful", " (20160930/tbxfload-342)"])
+    lines.append("2026-11-09 17:00:02.000 Df kernel[0:0] KBColor: methods missing: SFAN GFAN SPCT GPCT GRPM ECRN ECRD ECWR ")
+    let d = Diagnostics(config: nil)
+    d.injectedLog = lines.joined(separator: "\n")
+    let f = d.analyzeLogForTest()
+    for x in f { print(x.level.rawValue, x.text) }
+    let ok = f.contains { $0.level == .fail && $0.text.contains("SSDT-FANM") && $0.text.contains("rename") }
+        && f.contains { $0.level == .info && $0.text.contains("Ther_Rvp") }
+        && !f.contains { $0.level == .fail && $0.text.contains("Ther_Rvp") }
+        && f.contains { $0.text.contains("SFAN GFAN") }
+    print(ok ? "TEST GEÇTİ" : "TEST KALDI")
+    return ok ? 0 : 1
+}

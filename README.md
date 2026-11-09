@@ -98,6 +98,7 @@ KBColor.app ──IOKit properties──▶ KBColor.kext ──evaluate──▶
 | `setup/Sources/Discovery.swift` | Probe SSDT, snapshots, analysis, live tests. |
 | `setup/Sources/Readme.swift` | The generated README.html. |
 | `setup/Sources/UI.swift` | SwiftUI window. |
+| `shared/Diagnostics.swift` | Diagnostic report, used by both apps. |
 
 `KBCD.GCAP` bits:
 
@@ -114,6 +115,29 @@ KBColor.app ──IOKit properties──▶ KBColor.kext ──evaluate──▶
 | `0x100` | fan RPM |
 | `0x200` | fan key |
 | bits 16–23 | fan key label: 1 = Fn+F5, 2 = Turbo key |
+
+## Troubleshooting: diagnostic report
+
+If something does not work after installing, create a **diagnostic report**. It is available in two places:
+- the KBColor menu: *Tanılama raporu…*
+- the KBColor Kurulum start screen: *Tanılama raporu oluştur…*
+
+The report is read-only. It saves one text file on the Desktop, with a summary of the problems found (✗ / ! / ✓) on top, and covers:
+- **System:** macOS, SMBIOS model, CPU, OpenCore version and boot-args.
+- **ACPI and kext:** whether `\_SB.KBCD` exists, whether `KBColor.kext` is attached to it, which KBCD methods exist, and every value the kext publishes. Older kexts are handled too.
+- **Kernel log of the current boot:** ACPI errors such as `AE_ALREADY_EXISTS` (the usual sign of a missing fan key rename) and unresolved names, plus the kext's own `KBColor:` lines (2.1.0 and later).
+- **Optionally, your `EFI/OC/config.plist`:**
+  - SSDT order (KBLT before FANM)
+  - the `_Qxx → XQxx` rename
+  - the kext entry
+  - whether the files are in the EFI
+  - a probe and the final SSDTs enabled at the same time
+
+Attach the file to the [forum thread](https://osxinfo.net/konu/kbcolor-hackintosh-dizustuler-icin-klavye-isigi-ve-fan-kontrolu-acpi-dokumunden-ssdt-hazirlayan-kurulum-yardimcisiyla-asus-tuf-acer-predator.33539/) or to a GitHub issue. From the command line:
+
+```bash
+"KBColor Kurulum.app/Contents/MacOS/KBColorKurulum" --diagnose [path/to/config.plist]
+```
 
 ## Building
 

@@ -126,9 +126,12 @@ enum Readme {
             b += "</ul>"
         }
 
-        b += "<h2>Sorun olursa</h2><p>Şu iki çıktıyı ve bu klasördeki " + code("kaynak/") + " klasörünü gönder:</p>"
-        b += pre("ioreg -l -w0 -c KBColor")
-        b += pre("log show --last 5m --predicate 'sender == \"KBColor\" OR eventMessage CONTAINS \"ACPI\"' | tail -50")
+        b += "<h2>Sorun olursa</h2><p><strong>Tanılama raporu</strong> oluştur: KBColor menüsünde <em>Tanılama raporu…</em> "
+        b += "ya da KBColor Kurulum'un açılış ekranında <em>Tanılama raporu oluştur…</em>. Rapor şunlara bakar ve sorunu "
+        b += "özetleyip masaüstüne tek bir .txt dosyası olarak kaydeder: KBCD cihazı ve kext yüklü mü, hangi metotlar var, açılıştaki ACPI hataları, "
+        b += "istersen EFI'deki config.plist (SSDT sırası, rename, kext girdisi, dosyalar yerinde mi). Önce rapordaki ✗ satırlarına bak. "
+        b += "Çözemezsen raporu ve bu klasördeki " + code("kaynak/") + " klasörünü "
+        b += "<a href=\"\(Diagnostics.forumURL.absoluteString)\">forum konusuna</a> ekle.</p>"
 
         b += "<h2>Bu klasörde</h2><div class=\"table-wrap\"><table>"
         b += "<tr><td>\(code("EFI/OC/ACPI/"))</td><td>EFI'ye kopyalanacak SSDT'ler</td></tr>"
